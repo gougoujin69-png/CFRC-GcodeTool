@@ -173,9 +173,13 @@ Private Function BuildGcode(arr As Variant, nPts As Long, p As GcodeParams) As S
 
         If asTravel Then
             Dim cmt As String
-            If travelNext Then cmt = " ; travel after cut" _
-            ElseIf isLift Then cmt = " ; layer move" _
-            Else: cmt = ""
+            If travelNext Then
+                cmt = " ; travel after cut"
+            ElseIf isLift Then
+                cmt = " ; layer move"
+            Else
+                cmt = ""
+            End If
             lines(lc) = "G1 X" & F(xc) & " Y" & F(yc) & " Z" & F(zc) & " F" & F(p.FTravel) & cmt
         Else
             Dim de As Double: de = segLen * ePerMm
