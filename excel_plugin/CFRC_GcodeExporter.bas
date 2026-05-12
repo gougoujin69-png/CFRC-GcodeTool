@@ -1,10 +1,10 @@
 Attribute VB_Name = "CFRC_GcodeExporter"
 '==============================================================================
-' CFRC G-code Exporter for Excel  (v1.1 - no external references needed)
+' CFRC G-code Exporter for Excel  (v1.2 - absolute/relative E selectable)
 '   Author: Jazz Feng
 '   Data:   A=X(mm)  B=Y(mm)  C=Z(mm)  D=Cut flag(1=cut, blank=no)
 '   Output: G1 moves + custom Header + cut macros
-'   Extrusion: relative mode (M83), E = seg_len * W * H / (pi*(D/2)^2)
+'   Extrusion: M82(absolute) or M83(relative), E = seg_len * W * H / (pi*(D/2)^2)
 '==============================================================================
 Option Explicit
 
@@ -20,6 +20,7 @@ Public Type GcodeParams
     Header         As String
     HasHeader      As Boolean
     ZLiftThreshold As Double
+    AbsoluteE      As Boolean  ' True=M82(absolute), False=M83(relative)
     TotalE         As Double
     TotalLen       As Double
     CutCount       As Long
@@ -83,6 +84,7 @@ Public Sub ExportGcodeFromSheet()
 
     MsgBox "Exported: " & vbCrLf & CStr(savePath) & vbCrLf & vbCrLf & _
            "Points: " & nPts & "    Cuts: " & p.CutCount & vbCrLf & _
+           "E mode: " & IIf(p.AbsoluteE, "M82 Absolute", "M83 Relative") & vbCrLf & _
            "Total E = " & Format(p.TotalE, "0.000") & " mm" & vbCrLf & _
            "Total path = " & Format(p.TotalLen, "0.000") & " mm", _
            vbInformation, "Export done"
@@ -129,6 +131,7 @@ Private Function BuildGcode(arr As Variant, nPts As Long, p As GcodeParams) As S
     Dim travelNext As Boolean: travelNext = False
     Dim totalE As Double: totalE = 0#
     Dim totalLen As Double: totalLen = 0#
+    Dim cumE As Double: cumE = 0#         ' cumulative E for absolute mode
     Dim cutCount As Long: cutCount = 0
     Dim curLayerZ As Double: curLayerZ = z1
     Dim layerIdx As Long: layerIdx = 1
@@ -139,6 +142,7 @@ Private Function BuildGcode(arr As Variant, nPts As Long, p As GcodeParams) As S
         EmitCut lines, lc, cap, p
         cutCount = cutCount + 1
         travelNext = True
+        cumE = 0#
     End If
 
     Dim xPrev As Double, yPrev As Double, zPrev As Double
@@ -185,10 +189,17 @@ Private Function BuildGcode(arr As Variant, nPts As Long, p As GcodeParams) As S
             Dim de As Double: de = segLen * ePerMm
             totalE = totalE + de
             totalLen = totalLen + segLen
-            If Abs(dz) < 0.000001 Then
-                lines(lc) = "G1 X" & F(xc) & " Y" & F(yc) & " E" & F(de) & " F" & F(p.FPrint)
+            cumE = cumE + de
+            Dim eVal As Double
+            If p.AbsoluteE Then
+                eVal = cumE       ' M82: cumulative
             Else
-                lines(lc) = "G1 X" & F(xc) & " Y" & F(yc) & " Z" & F(zc) & " E" & F(de) & " F" & F(p.FPrint)
+                eVal = de         ' M83: per-segment
+            End If
+            If Abs(dz) < 0.000001 Then
+                lines(lc) = "G1 X" & F(xc) & " Y" & F(yc) & " E" & F(eVal) & " F" & F(p.FPrint)
+            Else
+                lines(lc) = "G1 X" & F(xc) & " Y" & F(yc) & " Z" & F(zc) & " E" & F(eVal) & " F" & F(p.FPrint)
             End If
         End If
 
@@ -200,6 +211,7 @@ Private Function BuildGcode(arr As Variant, nPts As Long, p As GcodeParams) As S
             EmitCut lines, lc, cap, p
             cutCount = cutCount + 1
             travelNext = True
+            cumE = 0#              ' G92 E0 resets accumulator
         End If
 
         xPrev = xc: yPrev = yc: zPrev = zc
@@ -273,6 +285,7 @@ Private Function LoadParamsDialog(ByRef p As GcodeParams) As Boolean
     p.RetractLen = GetStored("CFRC_RT", DEF_RETRACT)
     p.ZLiftThreshold = GetStored("CFRC_ZTHR", DEF_Z_LIFT_THR)
     p.CutMacro = GetStoredStr("CFRC_MACRO", DEF_CUT_MACRO)
+    p.AbsoluteE = (GetStored("CFRC_ABSE", 0) <> 0)  ' default: relative (M83)
     p.HasHeader = (GetStored("CFRC_HDR_ROW", IIf(DEF_HAS_HEADER, 1, 0)) <> 0)
     p.Header = GetStoredStr("CFRC_HEADER", DefaultHeader())
 
@@ -298,16 +311,26 @@ Private Function LoadParamsDialog(ByRef p As GcodeParams) As Boolean
     p.ZLiftThreshold = CDbl(Trim(parts(6)))
 
     Dim macroIn As String
-    macroIn = InputBox("Cut macro command:", "CFRC G-code Params (2/3)", p.CutMacro)
+    macroIn = InputBox("Cut macro command:", "CFRC G-code Params (2/4)", p.CutMacro)
     If Len(macroIn) = 0 Then Exit Function
     p.CutMacro = macroIn
+
+    ' E mode selection
+    Dim eAns As VbMsgBoxResult
+    eAns = MsgBox("Extrusion mode:" & vbCrLf & vbCrLf & _
+                  "[Yes] = M82 Absolute E  (E accumulates, reset by G92 E0 after cut)" & vbCrLf & _
+                  "[No]  = M83 Relative E  (E per segment, default)" & vbCrLf & vbCrLf & _
+                  "Current: " & IIf(p.AbsoluteE, "M82 Absolute", "M83 Relative"), _
+                  vbYesNoCancel + vbQuestion, "CFRC G-code Params (3/4)")
+    If eAns = vbCancel Then Exit Function
+    p.AbsoluteE = (eAns = vbYes)
 
     Dim hdrAns As VbMsgBoxResult
     hdrAns = MsgBox("Use saved Header?" & vbCrLf & vbCrLf & _
                     "Preview (first 3 lines):" & vbCrLf & _
                     HeadPreview(p.Header, 3) & vbCrLf & _
                     "[Yes] = use saved    [No] = paste new    [Cancel] = abort", _
-                    vbYesNoCancel + vbQuestion, "CFRC G-code Params (3/3)")
+                    vbYesNoCancel + vbQuestion, "CFRC G-code Params (4/4)")
     If hdrAns = vbCancel Then Exit Function
     If hdrAns = vbNo Then
         Dim newHdr As String
@@ -331,6 +354,7 @@ Private Function LoadParamsDialog(ByRef p As GcodeParams) As Boolean
     SetStored "CFRC_FT", p.FTravel
     SetStored "CFRC_RT", p.RetractLen
     SetStored "CFRC_ZTHR", p.ZLiftThreshold
+    SetStored "CFRC_ABSE", IIf(p.AbsoluteE, 1, 0)
     SetStored "CFRC_HDR_ROW", IIf(p.HasHeader, 1, 0)
     SetStoredStr "CFRC_MACRO", p.CutMacro
     SetStoredStr "CFRC_HEADER", p.Header
