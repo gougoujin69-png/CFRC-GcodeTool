@@ -1,10 +1,10 @@
 Attribute VB_Name = "CFRC_GcodeExporter"
 '==============================================================================
-' CFRC G-code Exporter for Excel  (v1.3 - per-row E multiplier)
+' CFRC G-code Exporter for Excel  (v1.4 - custom E_per_mm input)
 '   Author: Jazz Feng
 '   Data:   A=X(mm) B=Y(mm) C=Z(mm) D=Cut(1=cut) E=E_mult(blank=1.0)
 '   Output: G1 moves + custom Header + cut macros
-'   Extrusion: M82(absolute) or M83(relative), E = seg_len * W * H / (pi*(D/2)^2) * mult
+'   Extrusion: E = E_per_mm * seg_len * mult  (M82 or M83 selectable)
 '==============================================================================
 Option Explicit
 
@@ -21,6 +21,7 @@ Public Type GcodeParams
     HasHeader      As Boolean
     ZLiftThreshold As Double
     AbsoluteE      As Boolean  ' True=M82(absolute), False=M83(relative)
+    EPerMm         As Double   ' base extrusion per mm path length
     TotalE         As Double
     TotalLen       As Double
     CutCount       As Long
@@ -84,7 +85,8 @@ Public Sub ExportGcodeFromSheet()
 
     MsgBox "Exported: " & vbCrLf & CStr(savePath) & vbCrLf & vbCrLf & _
            "Points: " & nPts & "    Cuts: " & p.CutCount & vbCrLf & _
-           "E mode: " & IIf(p.AbsoluteE, "M82 Absolute", "M83 Relative") & vbCrLf & _
+           "E mode: " & IIf(p.AbsoluteE, "M82 Absolute", "M83 Relative") & _
+           "    E_per_mm: " & Format(p.EPerMm, "0.######") & vbCrLf & _
            "Total E = " & Format(p.TotalE, "0.000") & " mm" & vbCrLf & _
            "Total path = " & Format(p.TotalLen, "0.000") & " mm", _
            vbInformation, "Export done"
@@ -126,7 +128,7 @@ Private Function BuildGcode(arr As Variant, nPts As Long, p As GcodeParams) As S
     lines(lc) = "G1 X" & F(x1) & " Y" & F(y1) & " Z" & F(z1) & " F" & F(p.FTravel) & " ; move to start"
 
     Dim ePerMm As Double
-    ePerMm = (p.LineWidth * p.LayerHeight) / (3.14159265358979 * (p.FilamentDia / 2#) ^ 2)
+    ePerMm = p.EPerMm
 
     Dim travelNext As Boolean: travelNext = False
     Dim totalE As Double: totalE = 0#
@@ -306,7 +308,8 @@ Private Function LoadParamsDialog(ByRef p As GcodeParams) As Boolean
     p.RetractLen = GetStored("CFRC_RT", DEF_RETRACT)
     p.ZLiftThreshold = GetStored("CFRC_ZTHR", DEF_Z_LIFT_THR)
     p.CutMacro = GetStoredStr("CFRC_MACRO", DEF_CUT_MACRO)
-    p.AbsoluteE = (GetStored("CFRC_ABSE", 0) <> 0)  ' default: relative (M83)
+    p.AbsoluteE = (GetStored("CFRC_ABSE", 0) <> 0)
+    p.EPerMm = GetStored("CFRC_EPM", 0)  ' 0 = not set, will calculate from W/H/D
     p.HasHeader = (GetStored("CFRC_HDR_ROW", IIf(DEF_HAS_HEADER, 1, 0)) <> 0)
     p.Header = GetStoredStr("CFRC_HEADER", DefaultHeader())
 
@@ -315,7 +318,7 @@ Private Function LoadParamsDialog(ByRef p As GcodeParams) As Boolean
         "Print params (comma-separated, 7 items):" & vbCrLf & _
         "W, H, D, F_print, F_travel, Retract, Z_threshold" & vbCrLf & vbCrLf & _
         "Example: 0.4, 0.2, 1.75, 1800, 3000, 0, 0.05", _
-        "CFRC G-code Params (1/3)", _
+        "CFRC G-code Params (1/5)", _
         Format(p.LineWidth, "0.###") & ", " & Format(p.LayerHeight, "0.###") & ", " & _
         Format(p.FilamentDia, "0.###") & ", " & Format(p.FPrint, "0") & ", " & _
         Format(p.FTravel, "0") & ", " & Format(p.RetractLen, "0.###") & ", " & _
@@ -331,8 +334,31 @@ Private Function LoadParamsDialog(ByRef p As GcodeParams) As Boolean
     p.RetractLen = CDbl(Trim(parts(5)))
     p.ZLiftThreshold = CDbl(Trim(parts(6)))
 
+    ' E_per_mm: calculate from W/H/D as default, let user override
+    Dim calcEpm As Double
+    calcEpm = (p.LineWidth * p.LayerHeight) / (3.14159265358979 * (p.FilamentDia / 2#) ^ 2)
+    Dim epmDefault As Double
+    If p.EPerMm > 0 Then
+        epmDefault = p.EPerMm    ' use last saved value
+    Else
+        epmDefault = calcEpm     ' first time: use calculated
+    End If
+    Dim epmIn As String
+    epmIn = InputBox( _
+        "E_per_mm (extrusion per mm path length):" & vbCrLf & vbCrLf & _
+        "Calculated from W/H/D = " & Format(calcEpm, "0.######") & vbCrLf & _
+        "Last used = " & Format(epmDefault, "0.######") & vbCrLf & vbCrLf & _
+        "Confirm or enter your own value:", _
+        "CFRC G-code - E_per_mm (2/5)", _
+        Format(epmDefault, "0.######"))
+    If Len(epmIn) = 0 Then Exit Function
+    p.EPerMm = CDbl(Trim(epmIn))
+    If p.EPerMm <= 0 Then
+        MsgBox "E_per_mm must be > 0.", vbExclamation: Exit Function
+    End If
+
     Dim macroIn As String
-    macroIn = InputBox("Cut macro command:", "CFRC G-code Params (2/4)", p.CutMacro)
+    macroIn = InputBox("Cut macro command:", "CFRC G-code Params (3/5)", p.CutMacro)
     If Len(macroIn) = 0 Then Exit Function
     p.CutMacro = macroIn
 
@@ -342,7 +368,7 @@ Private Function LoadParamsDialog(ByRef p As GcodeParams) As Boolean
                   "[Yes] = M82 Absolute E  (E accumulates, reset by G92 E0 after cut)" & vbCrLf & _
                   "[No]  = M83 Relative E  (E per segment, default)" & vbCrLf & vbCrLf & _
                   "Current: " & IIf(p.AbsoluteE, "M82 Absolute", "M83 Relative"), _
-                  vbYesNoCancel + vbQuestion, "CFRC G-code Params (3/4)")
+                  vbYesNoCancel + vbQuestion, "CFRC G-code Params (4/5)")
     If eAns = vbCancel Then Exit Function
     p.AbsoluteE = (eAns = vbYes)
 
@@ -351,7 +377,7 @@ Private Function LoadParamsDialog(ByRef p As GcodeParams) As Boolean
                     "Preview (first 3 lines):" & vbCrLf & _
                     HeadPreview(p.Header, 3) & vbCrLf & _
                     "[Yes] = use saved    [No] = paste new    [Cancel] = abort", _
-                    vbYesNoCancel + vbQuestion, "CFRC G-code Params (4/4)")
+                    vbYesNoCancel + vbQuestion, "CFRC G-code Params (5/5)")
     If hdrAns = vbCancel Then Exit Function
     If hdrAns = vbNo Then
         Dim newHdr As String
@@ -376,6 +402,7 @@ Private Function LoadParamsDialog(ByRef p As GcodeParams) As Boolean
     SetStored "CFRC_RT", p.RetractLen
     SetStored "CFRC_ZTHR", p.ZLiftThreshold
     SetStored "CFRC_ABSE", IIf(p.AbsoluteE, 1, 0)
+    SetStored "CFRC_EPM", p.EPerMm
     SetStored "CFRC_HDR_ROW", IIf(p.HasHeader, 1, 0)
     SetStoredStr "CFRC_MACRO", p.CutMacro
     SetStoredStr "CFRC_HEADER", p.Header
