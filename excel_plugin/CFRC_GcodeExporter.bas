@@ -1,10 +1,10 @@
 Attribute VB_Name = "CFRC_GcodeExporter"
 '==============================================================================
-' CFRC G-code Exporter for Excel  (v1.2 - absolute/relative E selectable)
+' CFRC G-code Exporter for Excel  (v1.3 - per-row E multiplier)
 '   Author: Jazz Feng
-'   Data:   A=X(mm)  B=Y(mm)  C=Z(mm)  D=Cut flag(1=cut, blank=no)
+'   Data:   A=X(mm) B=Y(mm) C=Z(mm) D=Cut(1=cut) E=E_mult(blank=1.0)
 '   Output: G1 moves + custom Header + cut macros
-'   Extrusion: M82(absolute) or M83(relative), E = seg_len * W * H / (pi*(D/2)^2)
+'   Extrusion: M82(absolute) or M83(relative), E = seg_len * W * H / (pi*(D/2)^2) * mult
 '==============================================================================
 Option Explicit
 
@@ -67,7 +67,7 @@ Public Sub ExportGcodeFromSheet()
     End If
 
     Dim arr As Variant
-    arr = ws.Range(ws.Cells(startRow, 1), ws.Cells(lastRow, 4)).Value
+    arr = ws.Range(ws.Cells(startRow, 1), ws.Cells(lastRow, 5)).Value
 
     ' Save dialog (pure VBA, no Office library needed)
     Dim savePath As Variant
@@ -186,7 +186,9 @@ Private Function BuildGcode(arr As Variant, nPts As Long, p As GcodeParams) As S
             End If
             lines(lc) = "G1 X" & F(xc) & " Y" & F(yc) & " Z" & F(zc) & " F" & F(p.FTravel) & cmt
         Else
-            Dim de As Double: de = segLen * ePerMm
+            Dim de As Double
+            Dim eMult As Double: eMult = GetEMult(arr(r, 5))
+            de = segLen * ePerMm * eMult
             totalE = totalE + de
             totalLen = totalLen + segLen
             cumE = cumE + de
@@ -196,10 +198,16 @@ Private Function BuildGcode(arr As Variant, nPts As Long, p As GcodeParams) As S
             Else
                 eVal = de         ' M83: per-segment
             End If
-            If Abs(dz) < 0.000001 Then
-                lines(lc) = "G1 X" & F(xc) & " Y" & F(yc) & " E" & F(eVal) & " F" & F(p.FPrint)
+            Dim multCmt As String
+            If Abs(eMult - 1#) > 0.001 Then
+                multCmt = " ; E*" & F(eMult)
             Else
-                lines(lc) = "G1 X" & F(xc) & " Y" & F(yc) & " Z" & F(zc) & " E" & F(eVal) & " F" & F(p.FPrint)
+                multCmt = ""
+            End If
+            If Abs(dz) < 0.000001 Then
+                lines(lc) = "G1 X" & F(xc) & " Y" & F(yc) & " E" & F(eVal) & " F" & F(p.FPrint) & multCmt
+            Else
+                lines(lc) = "G1 X" & F(xc) & " Y" & F(yc) & " Z" & F(zc) & " E" & F(eVal) & " F" & F(p.FPrint) & multCmt
             End If
         End If
 
@@ -258,6 +266,19 @@ Private Function IsCutCell(v As Variant) As Boolean
         IsCutCell = (CDbl(s) <> 0)
     Else
         IsCutCell = (UCase(s) = "Y" Or UCase(s) = "YES" Or UCase(s) = "TRUE" Or UCase(s) = "CUT")
+    End If
+End Function
+
+Private Function GetEMult(v As Variant) As Double
+    ' Read E multiplier from column E. Blank/empty = 1.0 (default)
+    If IsEmpty(v) Or IsNull(v) Then GetEMult = 1#: Exit Function
+    Dim s As String: s = Trim(CStr(v))
+    If Len(s) = 0 Then GetEMult = 1#: Exit Function
+    If IsNumeric(s) Then
+        GetEMult = CDbl(s)
+        If GetEMult < 0 Then GetEMult = 0#  ' no negative extrusion
+    Else
+        GetEMult = 1#
     End If
 End Function
 
